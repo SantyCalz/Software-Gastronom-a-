@@ -736,40 +736,6 @@ const AdminPanel: React.FC = () => {
     descargarCSV(`catalogo-${aISOFecha(new Date())}.csv`, filas);
   };
 
-  const exportarCaja = () => {
-    const filas: (string | number)[][] = [
-      ['Tipo', 'Fecha', 'Hora', 'Cajero', 'Monto', 'Detalle'],
-    ];
-    if (turnoCaja) {
-      const { dia, hora } = formatearFechaHora(turnoCaja.fechaApertura);
-      filas.push([
-        'Apertura',
-        dia,
-        hora,
-        '—',
-        turnoCaja.montoInicial,
-        'Turno en curso',
-      ]);
-    }
-    arqueosOrdenados.forEach(a => {
-      const { dia, hora } = formatearFechaHora(a.fecha);
-      const etiqueta = ETIQUETA_ARQUEO[a.resultado] ?? a.resultado;
-      filas.push([
-        'Arqueo',
-        dia,
-        hora,
-        a.usuarioNombre,
-        a.montoContado,
-        `${etiqueta} (dif. ${a.diferencia >= 0 ? '+' : ''}$${a.diferencia})`,
-      ]);
-    });
-    egresosOrdenados.forEach(e => {
-      const { dia, hora } = formatearFechaHora(e.fechaHora);
-      filas.push(['Egreso', dia, hora, e.usuarioNombre, -e.monto, e.motivo]);
-    });
-    descargarCSV(`caja-${aISOFecha(new Date())}.csv`, filas);
-  };
-
   const abrirModalCategoria = () => {
     setNombreCat('');
     setErrorCat(null);
@@ -1031,7 +997,165 @@ const AdminPanel: React.FC = () => {
     URL.revokeObjectURL(url);
   };
 
-  const exportarVentas = () => {
+  // ---------- Modal de período al exportar ----------
+  // Ventas, Asistencia y Caja no se descargan a ciegas: el modal ofrece
+  // rangos rápidos o manual, muestra el conteo en vivo y nombra el archivo
+  // según el período elegido.
+  type TipoExport = 'ventas' | 'horas' | 'caja';
+  type RangoExport =
+    | 'hoy'
+    | 'ayer'
+    | '7dias'
+    | '30dias'
+    | 'mes'
+    | 'todo'
+    | 'rango';
+
+  const RANGOS_EXPORT: { id: RangoExport; etiqueta: string }[] = [
+    { id: 'hoy', etiqueta: 'Hoy' },
+    { id: 'ayer', etiqueta: 'Ayer' },
+    { id: '7dias', etiqueta: 'Últimos 7 días' },
+    { id: '30dias', etiqueta: 'Últimos 30 días' },
+    { id: 'mes', etiqueta: 'Mes actual' },
+    { id: 'todo', etiqueta: 'Histórico' },
+    { id: 'rango', etiqueta: 'Rango' },
+  ];
+
+  const TITULO_EXPORT: Record<TipoExport, string> = {
+    ventas: 'Ventas y Facturación',
+    horas: 'Control de Asistencia',
+    caja: 'Movimientos de Caja',
+  };
+
+  const [modalExport, setModalExport] = useState<TipoExport | null>(null);
+  const [rangoExp, setRangoExp] = useState<RangoExport>('hoy');
+  const [desdeExp, setDesdeExp] = useState(() => aISOFecha(new Date()));
+  const [hastaExp, setHastaExp] = useState(() => aISOFecha(new Date()));
+
+  const abrirModalExport = (tipo: TipoExport) => {
+    setRangoExp('hoy');
+    setDesdeExp(aISOFecha(new Date()));
+    setHastaExp(aISOFecha(new Date()));
+    setModalExport(tipo);
+  };
+
+  const rangoExportacion = useMemo(() => {
+    const hoyIni = inicioDelDia(new Date());
+    const DIA = 86400000;
+    switch (rangoExp) {
+      case 'hoy':
+        return { desde: hoyIni, hasta: null as Date | null, etiqueta: 'Hoy', sufijo: 'hoy' };
+      case 'ayer': {
+        const ayer = new Date(hoyIni.getTime() - DIA);
+        return { desde: ayer, hasta: hoyIni as Date | null, etiqueta: 'Ayer', sufijo: 'ayer' };
+      }
+      case '7dias':
+        return {
+          desde: new Date(hoyIni.getTime() - 6 * DIA),
+          hasta: null as Date | null,
+          etiqueta: 'Últimos 7 días',
+          sufijo: 'ultimos-7-dias',
+        };
+      case '30dias':
+        return {
+          desde: new Date(hoyIni.getTime() - 29 * DIA),
+          hasta: null as Date | null,
+          etiqueta: 'Últimos 30 días',
+          sufijo: 'ultimos-30-dias',
+        };
+      case 'mes': {
+        const ini = new Date(hoyIni.getFullYear(), hoyIni.getMonth(), 1);
+        return {
+          desde: ini,
+          hasta: null as Date | null,
+          etiqueta: 'Mes actual',
+          sufijo: `mes-${hoyIni.getFullYear()}-${String(hoyIni.getMonth() + 1).padStart(2, '0')}`,
+        };
+      }
+      case 'todo':
+        return {
+          desde: null as Date | null,
+          hasta: null as Date | null,
+          etiqueta: 'Histórico completo',
+          sufijo: 'historico',
+        };
+      case 'rango': {
+        let a = inicioDelDia(desdeISOFecha(desdeExp));
+        let b = inicioDelDia(desdeISOFecha(hastaExp));
+        if (a.getTime() > b.getTime()) {
+          const tmp = a;
+          a = b;
+          b = tmp;
+        }
+        return {
+          desde: a,
+          hasta: new Date(b.getTime() + DIA) as Date | null,
+          etiqueta: `${aISOFecha(a)} al ${aISOFecha(b)}`,
+          sufijo: `${aISOFecha(a)}_al_${aISOFecha(b)}`,
+        };
+      }
+    }
+  }, [rangoExp, desdeExp, hastaExp]);
+
+  const ventasExp = useMemo(() => {
+    const { desde, hasta } = rangoExportacion;
+    return pedidos
+      .filter(pedido => {
+        const t = new Date(pedido.fechaCreacion).getTime();
+        if (desde && t < desde.getTime()) return false;
+        if (hasta && t >= hasta.getTime()) return false;
+        return true;
+      })
+      .sort(
+        (a, b) =>
+          new Date(b.fechaCreacion).getTime() -
+          new Date(a.fechaCreacion).getTime(),
+      );
+  }, [pedidos, rangoExportacion]);
+
+  const jornadasExp = useMemo(() => {
+    const { desde, hasta } = rangoExportacion;
+    const desdeISO = desde ? aISOFecha(desde) : null;
+    const hastaISO = hasta ? aISOFecha(hasta) : null;
+    return resumenJornadas.filter(res => {
+      if (desdeISO && res.diaISO < desdeISO) return false;
+      if (hastaISO && res.diaISO >= hastaISO) return false;
+      return true;
+    });
+  }, [resumenJornadas, rangoExportacion]);
+
+  const cajaExp = useMemo(() => {
+    const { desde, hasta } = rangoExportacion;
+    const enRango = (fecha: Date) => {
+      const t = new Date(fecha).getTime();
+      if (desde && t < desde.getTime()) return false;
+      if (hasta && t >= hasta.getTime()) return false;
+      return true;
+    };
+    return {
+      apertura: turnoCaja && enRango(turnoCaja.fechaApertura) ? turnoCaja : null,
+      arqueos: arqueosOrdenados.filter(a => enRango(a.fecha)),
+      egresos: egresosOrdenados.filter(e => enRango(e.fechaHora)),
+    };
+  }, [rangoExportacion, turnoCaja, arqueosOrdenados, egresosOrdenados]);
+
+  const registrosExp =
+    modalExport === 'ventas'
+      ? ventasExp.length
+      : modalExport === 'horas'
+        ? jornadasExp.length
+        : cajaExp.arqueos.length +
+          cajaExp.egresos.length +
+          (cajaExp.apertura ? 1 : 0);
+
+  const conteoExp =
+    modalExport === 'caja'
+      ? `${registrosExp} ${registrosExp === 1 ? 'movimiento encontrado' : 'movimientos encontrados'}`
+      : modalExport === 'horas'
+        ? `${registrosExp} ${registrosExp === 1 ? 'jornada encontrada' : 'jornadas encontradas'}`
+        : `${registrosExp} ${registrosExp === 1 ? 'pedido encontrado' : 'pedidos encontrados'}`;
+
+  const exportarVentasRango = () => {
     const filas: (string | number)[][] = [
       [
         'ID',
@@ -1045,7 +1169,7 @@ const AdminPanel: React.FC = () => {
         'Motivo Anulación',
       ],
     ];
-    historial.forEach(pedido => {
+    ventasExp.forEach(pedido => {
       const { dia, hora } = formatearFechaHora(pedido.fechaCreacion);
       filas.push([
         pedido.id,
@@ -1063,15 +1187,15 @@ const AdminPanel: React.FC = () => {
         pedido.motivoAnulacion ?? '',
       ]);
     });
-    descargarCSV(`ventas-${aISOFecha(new Date())}.csv`, filas);
+    descargarCSV(`ventas_${rangoExportacion.sufijo}.csv`, filas);
   };
 
-  const exportarHoras = () => {
+  const exportarHorasRango = () => {
     const filas: (string | number)[][] = [
       ['Empleado', 'Rol', 'Fecha', 'Entrada', 'Salida', 'Horas Netas'],
     ];
     const anio = new Date().getFullYear();
-    resumenJornadas.forEach(res => {
+    jornadasExp.forEach(res => {
       const [dd, mm] = res.dia.split('/');
       filas.push([
         res.usuarioNombre,
@@ -1082,7 +1206,49 @@ const AdminPanel: React.FC = () => {
         res.enTurno ? `En turno (${res.tiempoEnTurno})` : res.duracion,
       ]);
     });
-    descargarCSV(`horas-${aISOFecha(new Date())}.csv`, filas);
+    descargarCSV(`horas_${rangoExportacion.sufijo}.csv`, filas);
+  };
+
+  const exportarCajaRango = () => {
+    const filas: (string | number)[][] = [
+      ['Tipo', 'Fecha', 'Hora', 'Cajero', 'Monto', 'Detalle'],
+    ];
+    if (cajaExp.apertura) {
+      const { dia, hora } = formatearFechaHora(cajaExp.apertura.fechaApertura);
+      filas.push([
+        'Apertura',
+        dia,
+        hora,
+        '—',
+        cajaExp.apertura.montoInicial,
+        'Turno en curso',
+      ]);
+    }
+    cajaExp.arqueos.forEach(a => {
+      const { dia, hora } = formatearFechaHora(a.fecha);
+      const etiqueta = ETIQUETA_ARQUEO[a.resultado] ?? a.resultado;
+      filas.push([
+        'Arqueo',
+        dia,
+        hora,
+        a.usuarioNombre,
+        a.montoContado,
+        `${etiqueta} (dif. ${a.diferencia >= 0 ? '+' : ''}$${a.diferencia})`,
+      ]);
+    });
+    cajaExp.egresos.forEach(e => {
+      const { dia, hora } = formatearFechaHora(e.fechaHora);
+      filas.push(['Egreso', dia, hora, e.usuarioNombre, -e.monto, e.motivo]);
+    });
+    descargarCSV(`caja_${rangoExportacion.sufijo}.csv`, filas);
+  };
+
+  const confirmarExport = () => {
+    if (!modalExport || registrosExp === 0) return;
+    if (modalExport === 'ventas') exportarVentasRango();
+    else if (modalExport === 'horas') exportarHorasRango();
+    else exportarCajaRango();
+    setModalExport(null);
   };
 
   // ---------- Control de Asistencia ----------
@@ -2750,7 +2916,7 @@ const AdminPanel: React.FC = () => {
                 descuentos
               </p>
               <button
-                onClick={exportarVentas}
+                onClick={() => abrirModalExport('ventas')}
                 className="mt-3 rounded-xl border border-amber-500/60 px-4 py-2 text-sm font-semibold text-amber-400 hover:bg-amber-500/10 transition-colors"
               >
                 Exportar Ventas (.csv)
@@ -2763,7 +2929,8 @@ const AdminPanel: React.FC = () => {
                 Catálogo y Stock
               </h3>
               <p className="mt-1 text-xs text-stone-500">
-                {productos.length} productos · precios y disponibilidad
+                {productos.length} productos · Foto actual del menú completo
+                (sin filtro de fechas)
               </p>
               <button
                 onClick={exportarCatalogo}
@@ -2782,7 +2949,7 @@ const AdminPanel: React.FC = () => {
                 {fichajesOrdenados.length} fichajes · horas por jornada
               </p>
               <button
-                onClick={exportarHoras}
+                onClick={() => abrirModalExport('horas')}
                 className="mt-3 rounded-xl border border-amber-500/60 px-4 py-2 text-sm font-semibold text-amber-400 hover:bg-amber-500/10 transition-colors"
               >
                 Exportar Horas (.csv)
@@ -2799,7 +2966,7 @@ const AdminPanel: React.FC = () => {
                 egresos
               </p>
               <button
-                onClick={exportarCaja}
+                onClick={() => abrirModalExport('caja')}
                 className="mt-3 rounded-xl border border-amber-500/60 px-4 py-2 text-sm font-semibold text-amber-400 hover:bg-amber-500/10 transition-colors"
               >
                 Exportar Caja (.csv)
@@ -2807,6 +2974,106 @@ const AdminPanel: React.FC = () => {
             </div>
           </div>
         </section>
+
+        {/* ---------- Modal de período al exportar ---------- */}
+        {modalExport && (
+          <div
+            className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 p-4"
+            onClick={() => setModalExport(null)}
+          >
+            <div
+              className="w-full max-w-md max-h-[90vh] overflow-y-auto bg-stone-950 border border-stone-800 rounded-2xl p-5"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-3 mb-1">
+                <div>
+                  <h2 className="text-lg font-bold text-stone-100">
+                    Exportar {TITULO_EXPORT[modalExport]}
+                  </h2>
+                  <p className="text-xs text-stone-500">
+                    Elegí el período · {rangoExportacion.etiqueta}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setModalExport(null)}
+                  aria-label="Cerrar"
+                  className="p-1.5 rounded-md text-stone-400 hover:text-stone-100 hover:bg-stone-800 transition-colors"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <div className="flex flex-wrap gap-2 my-4">
+                {RANGOS_EXPORT.map(r => (
+                  <button
+                    key={r.id}
+                    onClick={() => setRangoExp(r.id)}
+                    className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                      rangoExp === r.id
+                        ? 'bg-amber-500 text-stone-950'
+                        : 'bg-stone-800 text-stone-300 hover:bg-stone-700'
+                    }`}
+                  >
+                    {r.etiqueta}
+                  </button>
+                ))}
+              </div>
+
+              {rangoExp === 'rango' && (
+                <div className="flex items-center gap-2 mb-4">
+                  <input
+                    type="date"
+                    value={desdeExp}
+                    max={hastaExp}
+                    onChange={e => setDesdeExp(e.target.value)}
+                    aria-label="Fecha desde"
+                    className="w-full bg-stone-900 border border-stone-700 rounded-lg px-2 py-1.5 text-sm text-stone-100 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  />
+                  <span className="text-stone-500 text-sm shrink-0">al</span>
+                  <input
+                    type="date"
+                    value={hastaExp}
+                    min={desdeExp}
+                    onChange={e => setHastaExp(e.target.value)}
+                    aria-label="Fecha hasta"
+                    className="w-full bg-stone-900 border border-stone-700 rounded-lg px-2 py-1.5 text-sm text-stone-100 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  />
+                </div>
+              )}
+
+              <p
+                className={`rounded-xl border px-4 py-3 text-sm text-center mb-4 ${
+                  registrosExp > 0
+                    ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                    : 'border-stone-700 bg-stone-900 text-stone-500'
+                }`}
+              >
+                {conteoExp}
+              </p>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setModalExport(null)}
+                  className="flex-1 py-2.5 rounded-lg bg-stone-800 border border-stone-700 text-stone-300 text-sm font-semibold hover:bg-stone-700 transition-colors"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={confirmarExport}
+                  disabled={registrosExp === 0}
+                  className="flex-[2] py-2.5 rounded-lg bg-amber-500 text-stone-950 text-sm font-bold hover:bg-amber-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                >
+                  Descargar CSV
+                </button>
+              </div>
+              {registrosExp === 0 && (
+                <p className="mt-2 text-xs text-stone-500 text-center">
+                  Sin registros en este período. Elegí otro rango.
+                </p>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* ---------- Modal Nueva Categoría ---------- */}
         {modalCategoria && (
